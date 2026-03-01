@@ -5,6 +5,71 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026.2.9] - 2026-03-01
+
+### Fixed — performSetup No Longer Destroys Auth Before Chrome Opens
+- **Root cause identified**: `performSetup()` was calling `clearAllAuthData()` unconditionally before launching Chrome
+- If Chrome failed to open for any reason (display issue, profile lock, timeout), credentials were already gone
+- **Fix**: Removed `clearAllAuthData()` from `performSetup()` — auth is only cleared if Chrome successfully opens and the user re-authenticates
+- Added stack trace logging to `clearAllAuthData()` so any future caller can be traced in logs
+
+## [2026.2.8] - 2026-03-01
+
+### Fixed — cleanup_data No Longer Destroys Auth Credentials
+- **Root cause identified**: `browser_state/` and `chrome_profile/` directories were included in all `cleanup_data` deletion paths
+- Sessions following `get_health` troubleshooting tips ran `cleanup_data` and wiped Google auth cookies
+- **Fix**: Both auth directories permanently excluded from ALL cleanup paths (both `preserve_library=true` and `preserve_library=false`)
+- **Fix**: `get_health` troubleshooting tip updated — no longer suggests running `cleanup_data`
+- Auth credentials now survive all cleanup operations
+
+## [2026.2.7] - 2026-03-01
+
+### Fixed — Headless setup_auth Blocked
+- `setup_auth` without `show_browser: true` now returns an error immediately instead of attempting headless auth (which would fail silently)
+- Consistent with existing `re_auth` headless guard added in v2026.2.4
+
+### Added — Standalone auth-now.mjs Script
+- New `auth-now.mjs` in project root bypasses MCP protocol entirely
+- Handles Chrome profile lock (kills existing Chrome processes before launch)
+- Saves `state.json.pqenc` via SecureStorage with plain JSON fallback
+- Verifies file exists on disk after save with size check
+- Stays open 60s after success so user can confirm
+
+## [2026.2.6] - 2026-03-01
+
+### Added — Bulk Folder Upload Tool
+- **`add_folder`** — New tool to upload all PDFs/files from a local directory to a notebook
+- Supports `dry_run` mode, `recursive` traversal, `file_types` filter, and progress callbacks
+- Collects per-file errors and reports a summary instead of failing the whole batch
+- Handles large folders (90+ files) with sequential upload and per-file error recovery
+
+### Fixed — Tier Detection for NotebookLM Plus
+- `detectTierFromPage()` now detects "NOTEBOOKLM PLUS", "ONE AI PREMIUM", and "GOOGLE ONE AI" branding
+- Falls back to inferring tier from source limit shown in UI (50→free, 300→pro, 600→ultra)
+- Resolves issue where tier was stuck on "unknown" defaulting to free tier limits
+
+## [2026.2.5] - 2026-03-01
+
+### Fixed — show_browser Silently Ignored in setup_auth
+- `setup_auth` handler received `show_browser` parameter but never passed it to `performSetup()`
+- Chrome stayed headless even when `show_browser: true` was explicitly set
+- **Fix**: `performSetup()` now accepts and uses `show_browser` (overrideHeadless) parameter
+- Browser now reliably opens for user authentication when requested
+
+## [2026.2.4] - 2026-03-01
+
+### Fixed — Auth State Expiry Extended to 7 Days
+- State expiry extended from 24 hours to 7 days — matches real Google cookie lifetimes (2-4 weeks)
+- `touchStateFile()` method added: resets the expiry clock on every successful auth validation so active sessions never expire
+- Called in both `validateWithRetry()` fast path and retry success path
+
+### Fixed — Headless re_auth Blocked
+- `re_auth` without `show_browser: true` now returns a clear error instead of wiping auth state and failing silently
+- Prevents the silent credential destruction loop caused by automated/headless `re_auth` calls
+
+### Added — clearAllAuthData Caller Tracing
+- `clearAllAuthData()` now logs a stack trace excerpt so any future unexpected caller can be identified in logs
+
 ## [2026.2.3] - 2026-02-20
 
 ### Fixed — Studio Panel Tools Fully Restored

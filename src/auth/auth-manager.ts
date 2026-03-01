@@ -6,7 +6,7 @@
  * - Auto-login with credentials (email/password from ENV)
  * - Browser state persistence (cookies + localStorage + sessionStorage)
  * - Cookie expiry validation
- * - State expiry checks (24h file age)
+ * - State expiry checks (7-day file age)
  * - Hard reset for clean start
  *
  * Based on the Python implementation from auth.py
@@ -148,7 +148,7 @@ export class AuthManager {
     }
 
     if (await this.isStateExpired()) {
-      log.warning("⚠️  Saved state is expired (>24h old)");
+      log.warning("⚠️  Saved state is expired (>7 days old)");
       log.info("💡 Run setup_auth tool to re-authenticate");
       return null;
     }
@@ -404,7 +404,7 @@ export class AuthManager {
   }
 
   /**
-   * Check if the saved state file is too old (>24 hours)
+   * Check if the saved state file is too old (>7 days)
    * Checks encrypted versions (.pqenc, .enc) as well as unencrypted
    */
   async isStateExpired(): Promise<boolean> {
