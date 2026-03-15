@@ -5,7 +5,7 @@
  */
 
 export { buildToolDefinitions } from "./definitions.js";
-export { ToolHandlers } from "./handlers.js";
+export { ToolHandlers } from "./handlers/index.js";
 export { getToolIcons, toolIcons } from "./icons.js";
 export { getToolMetadata, toolMetadata } from "./annotations.js";
 export type { ToolMetadata } from "./annotations.js";

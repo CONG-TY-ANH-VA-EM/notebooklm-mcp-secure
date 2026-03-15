@@ -4,20 +4,20 @@
 
 ### 🏆 The World's Most Advanced NotebookLM MCP Server
 
-**Zero-hallucination answers • Gemini Deep Research • 14 Security Layers • Enterprise Compliance**
+**Zero-hallucination answers • Gemini Deep Research • 17 Security Layers • Enterprise Compliance**
 
 [![npm](https://img.shields.io/npm/v/@pan-sec/notebooklm-mcp?color=blue)](https://www.npmjs.com/package/@pan-sec/notebooklm-mcp)
 [![CalVer](https://img.shields.io/badge/CalVer-2026.x.x-blue.svg)](https://calver.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue.svg)](https://www.typescriptlang.org/)
 [![MCP](https://img.shields.io/badge/MCP-2026-green.svg)](https://modelcontextprotocol.io/)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#cross-platform-support)
-[![Security](https://img.shields.io/badge/Security-14%20Layers-red.svg)](./SECURITY.md)
+[![Security](https://img.shields.io/badge/Security-17%20Layers-red.svg)](./SECURITY.md)
 [![Post-Quantum](https://img.shields.io/badge/Encryption-Post--Quantum-purple.svg)](./SECURITY.md#post-quantum-encryption)
 [![Gemini](https://img.shields.io/badge/Gemini-Deep%20Research-4285F4.svg)](#-gemini-deep-research-v180)
 [![Documents](https://img.shields.io/badge/Documents-API%20Upload-34A853.svg)](#-document-api-v190)
 [![Notebooks](https://img.shields.io/badge/Notebooks-Create%20%26%20Manage-orange.svg)](#programmatic-notebook-creation-v170)
 [![Compliance](https://img.shields.io/badge/Compliance-GDPR%20%7C%20SOC2%20%7C%20CSSF-blue.svg)](./docs/COMPLIANCE-SPEC.md)
-[![Tests](https://img.shields.io/badge/Tests-111%20Passing-brightgreen.svg)](./tests/)
+[![Tests](https://img.shields.io/badge/Tests-168%20Passing-brightgreen.svg)](./tests/)
 
 [**What's New 2026**](#-whats-new-in-2026) • [**Deep Research**](#-gemini-deep-research) • [**Document API**](#-document-api) • [**Create Notebooks**](#programmatic-notebook-creation) • [**Security**](#security-features) • [**Install**](#installation)
 
@@ -36,7 +36,7 @@
 - 📊 **Extract data tables** — structured JSON from notebook sources **NEW**
 - 🔬 **Gemini 3 + Deep Research** — latest models with thinking control (optional API) **NEW**
 - 📄 **Document API** — upload & query PDFs without browser (optional API)
-- 🔐 **14 security layers** — post-quantum encryption, audit logs, secrets scanning
+- 🔐 **17 security layers** — post-quantum encryption, audit logs, secrets scanning
 - ✅ **Enterprise compliance** — GDPR, SOC2, CSSF ready
 - 💡 **No API key required** — core features work with just browser auth
 
@@ -234,7 +234,7 @@ Run deep research in the background and check progress:
 │  └────────────────────────────────┘    └──────────────────────────────────┘  │
 │                                                                              │
 │                      ┌─────────────────────────────────┐                     │
-│                      │       14 SECURITY LAYERS        │                     │
+│                      │       17 SECURITY LAYERS        │                     │
 │                      │   Post-Quantum • Audit Logs     │                     │
 │                      │   Cert Pinning • Memory Wipe    │                     │
 │                      │   GDPR • SOC2 • CSSF Ready      │                     │
@@ -635,7 +635,7 @@ The original NotebookLM MCP is excellent for productivity — but MCP servers ha
 - **Cookies and tokens** stored on disk
 - **Query history** that may contain proprietary information
 
-This fork adds **14 security hardening layers** to protect that data.
+This fork adds **17 security hardening layers** to protect that data.
 
 ---
 
@@ -656,6 +656,9 @@ This fork adds **14 security hardening layers** to protect that data.
 | 🙈 | **Log Sanitization** | Credentials masked in all output |
 | 🐍 | **MEDUSA Integration** | Automated security scanning |
 | 🖥️ | **Cross-Platform** | Native support for Linux, macOS, Windows |
+| 🔒 | **Secure-by-Default Auth** | Auth ON without configuration, explicit opt-out required |
+| 📈 | **Exponential Backoff** | Lockout escalation: 5min → 15min → 45min → 4hr cap |
+| 🗝️ | **Credential Isolation** | SecureCredential TTL + env var scrubbing from process.env |
 
 ### Post-Quantum Ready
 

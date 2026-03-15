@@ -17,6 +17,32 @@ import fs from "fs";
 import path from "path";
 import { execFileSync } from "child_process";
 
+// Lazy imports to avoid circular dependency (audit-logger → config → file-permissions)
+let _log: typeof import("./logger.js").log | null = null;
+let _audit: typeof import("./audit-logger.js").audit | null = null;
+
+async function getLazyImports() {
+  if (!_log) {
+    const { log } = await import("./logger.js");
+    _log = log;
+  }
+  if (!_audit) {
+    const { audit } = await import("./audit-logger.js");
+    _audit = audit;
+  }
+  return { log: _log, audit: _audit };
+}
+
+function logPermissionWarning(message: string, details: Record<string, string>) {
+  // Fire-and-forget: log warning without blocking
+  getLazyImports().then(({ log, audit }) => {
+    log.warning(message);
+    audit.security("permission_failure", "warning", details);
+  }).catch(() => {
+    // Ignore import failures during early startup
+  });
+}
+
 /**
  * Platform detection
  */
@@ -57,8 +83,13 @@ export function setSecureFilePermissions(
       fs.chmodSync(filePath, mode);
       return true;
     }
-  } catch {
-    // Silently fail - permissions are best-effort on some systems
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logPermissionWarning(`⚠️  Failed to set file permissions on ${filePath}: ${msg}`, {
+      file: filePath,
+      mode: mode.toString(8),
+      error: msg,
+    });
     return false;
   }
 }
@@ -81,8 +112,13 @@ export function setSecureDirectoryPermissions(
       fs.chmodSync(dirPath, mode);
       return true;
     }
-  } catch {
-    // Silently fail - permissions are best-effort on some systems
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logPermissionWarning(`⚠️  Failed to set directory permissions on ${dirPath}: ${msg}`, {
+      directory: dirPath,
+      mode: mode.toString(8),
+      error: msg,
+    });
     return false;
   }
 }
@@ -152,8 +188,10 @@ function setWindowsFilePermissions(targetPath: string, ownerOnly: boolean): bool
   try {
     // Defense-in-depth: Validate path before using in shell command
     if (!isPathSafeForShell(targetPath)) {
-      // Log would be nice but we don't have logger imported here
-      // Silently fail for invalid paths
+      logPermissionWarning(`⚠️  Rejected unsafe path for permissions: ${targetPath}`, {
+        path: targetPath,
+        error: "path_failed_safety_check",
+      });
       return false;
     }
 

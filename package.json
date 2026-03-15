@@ -1,6 +1,6 @@
 {
   "name": "@pan-sec/notebooklm-mcp",
-  "version": "2026.2.9",
+  "version": "2026.2.10",
   "mcpName": "io.github.Pantheon-Security/notebooklm-mcp-secure",
   "description": "Security-hardened MCP server for NotebookLM API with enterprise compliance (GDPR, SOC2, CSSF)",
   "type": "module",
@@ -87,7 +87,10 @@
     "secretsScanning": true,
     "certificatePinning": true,
     "memoryScubbing": true,
-    "medusaIntegration": true
+    "medusaIntegration": true,
+    "secureByDefaultAuth": true,
+    "exponentialBackoffLockout": true,
+    "credentialIsolation": true
   },
   "enterpriseCompliance": {
     "gdpr": {

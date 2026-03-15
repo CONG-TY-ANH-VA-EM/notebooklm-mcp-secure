@@ -1,0 +1,291 @@
+/**
+ * Handler for the ask_question tool
+ */
+
+import type { HandlerContext } from "./types.js";
+import { CONFIG, type BrowserOptions } from "../../config.js";
+import { log } from "../../utils/logger.js";
+import type {
+  AskQuestionResult,
+  ToolResult,
+  ProgressCallback,
+} from "../../types.js";
+import { RateLimitError } from "../../errors.js";
+import {
+  validateNotebookUrl,
+  validateNotebookId,
+  validateSessionId,
+  validateQuestion,
+  sanitizeForLogging,
+  SecurityError,
+} from "../../utils/security.js";
+import { audit } from "../../utils/audit-logger.js";
+import { validateResponse } from "../../utils/response-validator.js";
+import { getQuotaManager } from "../../quota/index.js";
+import { getQueryLogger } from "../../logging/index.js";
+
+/**
+ * Handle ask_question tool
+ */
+export async function handleAskQuestion(
+  ctx: HandlerContext,
+  args: {
+    question: string;
+    session_id?: string;
+    notebook_id?: string;
+    notebook_url?: string;
+    show_browser?: boolean;
+    browser_options?: BrowserOptions;
+  },
+  sendProgress?: ProgressCallback
+): Promise<ToolResult<AskQuestionResult>> {
+  const { show_browser, browser_options } = args;
+  const startTime = Date.now();
+
+  log.info(`🔧 [TOOL] ask_question called`);
+
+  // === SECURITY: Input validation ===
+  let safeQuestion: string;
+  let safeSessionId: string | undefined;
+  let safeNotebookId: string | undefined;
+  let safeNotebookUrl: string | undefined;
+
+  try {
+    // Validate question (required)
+    safeQuestion = validateQuestion(args.question);
+    log.info(`  Question: "${sanitizeForLogging(safeQuestion.substring(0, 100))}"...`);
+
+    // Validate optional session_id
+    if (args.session_id) {
+      safeSessionId = validateSessionId(args.session_id);
+      log.info(`  Session ID: ${safeSessionId}`);
+    }
+
+    // Validate optional notebook_id
+    if (args.notebook_id) {
+      safeNotebookId = validateNotebookId(args.notebook_id);
+      log.info(`  Notebook ID: ${safeNotebookId}`);
+    }
+
+    // Validate optional notebook_url (CRITICAL - prevents URL injection)
+    if (args.notebook_url) {
+      safeNotebookUrl = validateNotebookUrl(args.notebook_url);
+      log.info(`  Notebook URL: ${safeNotebookUrl}`);
+    }
+
+    // Rate limiting check
+    const rateLimitKey = safeSessionId || 'global';
+    if (!ctx.rateLimiter.isAllowed(rateLimitKey)) {
+      log.warning(`🚫 Rate limit exceeded for ${rateLimitKey}`);
+      await audit.security("rate_limit_exceeded", "warning", {
+        session_id: rateLimitKey,
+        remaining: ctx.rateLimiter.getRemaining(rateLimitKey),
+      });
+      await audit.tool("ask_question", args, false, Date.now() - startTime, "Rate limit exceeded");
+      return {
+        success: false,
+        error: `Rate limit exceeded. Please wait before making more requests. Remaining: ${ctx.rateLimiter.getRemaining(rateLimitKey)}`,
+      };
+    }
+
+    // === QUOTA CHECK ===
+    const quotaManager = getQuotaManager();
+    const canQuery = quotaManager.canMakeQuery();
+    if (!canQuery.allowed) {
+      log.warning(`⚠️ Quota limit: ${canQuery.reason}`);
+      await audit.tool("ask_question", args, false, Date.now() - startTime, canQuery.reason || "Query quota exceeded");
+      return {
+        success: false,
+        error: canQuery.reason || "Daily query limit reached. Try again tomorrow or upgrade your plan.",
+      };
+    }
+  } catch (error) {
+    if (error instanceof SecurityError) {
+      log.error(`🛡️ [SECURITY] Validation failed: ${error.message}`);
+      await audit.security("validation_failed", "error", {
+        tool: "ask_question",
+        error: error.message,
+      });
+      await audit.tool("ask_question", args, false, Date.now() - startTime, error.message);
+      return {
+        success: false,
+        error: `Security validation failed: ${error.message}`,
+      };
+    }
+    throw error;
+  }
+
+  try {
+    // Resolve notebook URL (using validated values)
+    let resolvedNotebookUrl = safeNotebookUrl;
+
+    if (!resolvedNotebookUrl && safeNotebookId) {
+      const notebook = ctx.library.incrementUseCount(safeNotebookId);
+      if (!notebook) {
+        throw new Error(`Notebook not found in library: ${safeNotebookId}`);
+      }
+
+      resolvedNotebookUrl = notebook.url;
+      log.info(`  Resolved notebook: ${notebook.name}`);
+    } else if (!resolvedNotebookUrl) {
+      const active = ctx.library.getActiveNotebook();
+      if (active) {
+        const notebook = ctx.library.incrementUseCount(active.id);
+        if (!notebook) {
+          throw new Error(`Active notebook not found: ${active.id}`);
+        }
+        resolvedNotebookUrl = notebook.url;
+        log.info(`  Using active notebook: ${notebook.name}`);
+      }
+    }
+
+    // Progress: Getting or creating session
+    await sendProgress?.("Getting or creating browser session...", 1, 5);
+
+    // Calculate overrideHeadless parameter for session manager
+    // show_browser takes precedence over browser_options.headless
+    let overrideHeadless: boolean | undefined = undefined;
+    if (show_browser !== undefined) {
+      overrideHeadless = show_browser;
+    } else if (browser_options?.show !== undefined) {
+      overrideHeadless = browser_options.show;
+    } else if (browser_options?.headless !== undefined) {
+      overrideHeadless = !browser_options.headless;
+    }
+
+    // Get or create session (with headless override to handle mode changes)
+    const session = await ctx.sessionManager.getOrCreateSession(
+        safeSessionId,
+        resolvedNotebookUrl,
+        overrideHeadless
+      );
+
+    // Progress: Asking question
+    await sendProgress?.("Asking question to NotebookLM...", 2, 5);
+
+    // Ask the question (pass progress callback) - using validated question
+    const rawAnswer = await session.ask(safeQuestion, sendProgress);
+
+    // === SECURITY: Validate response for prompt injection & malicious content ===
+    await sendProgress?.("Validating response security...", 4, 5);
+    const validationResult = await validateResponse(rawAnswer);
+
+    // Use sanitized response if issues were found
+    let finalAnswer: string;
+    let securityWarnings: string[] = [];
+
+    if (!validationResult.safe) {
+      log.warning(`🛡️ Response contained blocked content, using sanitized version`);
+      finalAnswer = validationResult.sanitized;
+      securityWarnings = validationResult.blocked;
+    } else if (validationResult.warnings.length > 0) {
+      log.info(`⚠️ Response had ${validationResult.warnings.length} warnings`);
+      finalAnswer = rawAnswer;
+      securityWarnings = validationResult.warnings;
+    } else {
+      finalAnswer = rawAnswer;
+    }
+
+    const followUpReminder = CONFIG.followUpEnabled ? CONFIG.followUpReminder : "";
+    const answer = `${finalAnswer.trimEnd()}${followUpReminder}`;
+
+    // Get session info
+    const sessionInfo = session.getInfo();
+
+    // Get quota status for response visibility
+    const quotaStatus = getQuotaManager().getDetailedStatus();
+
+    const result: AskQuestionResult = {
+      status: "success",
+      question: safeQuestion,
+      answer,
+      session_id: session.sessionId,
+      notebook_url: session.notebookUrl,
+      session_info: {
+        age_seconds: sessionInfo.age_seconds,
+        message_count: sessionInfo.message_count,
+        last_activity: sessionInfo.last_activity,
+      },
+      // Include quota info for visibility
+      quota_info: {
+        queries_remaining: quotaStatus.queries.remaining,
+        queries_used_today: quotaStatus.queries.used,
+        queries_limit: quotaStatus.queries.limit,
+        should_stop: quotaStatus.queries.shouldStop,
+        tier: quotaStatus.tier,
+        warnings: quotaStatus.warnings,
+      },
+      // Include security warnings if any
+      ...(securityWarnings.length > 0 && { security_warnings: securityWarnings }),
+    };
+
+      // Progress: Complete
+      await sendProgress?.("Question answered successfully!", 5, 5);
+
+      log.success(`✅ [TOOL] ask_question completed successfully`);
+
+      // Update quota tracking (atomic for concurrent session safety)
+      await getQuotaManager().incrementQueryCountAtomic();
+
+      // Log query for research history (Phase 1)
+      const queryLogger = getQueryLogger();
+      const resolvedNotebook = safeNotebookId ? ctx.library.getNotebook(safeNotebookId) : null;
+      await queryLogger.logQuery({
+        sessionId: session.sessionId,
+        notebookId: safeNotebookId,
+        notebookUrl: session.notebookUrl,
+        notebookName: resolvedNotebook?.name,
+        question: safeQuestion,
+        answer: finalAnswer,
+        answerLength: finalAnswer.length,
+        durationMs: Date.now() - startTime,
+        quotaInfo: {
+          used: quotaStatus.queries.used + 1, // +1 because we just incremented
+          limit: quotaStatus.queries.limit,
+          remaining: quotaStatus.queries.remaining - 1,
+          tier: quotaStatus.tier,
+        },
+      });
+
+      // Audit: successful tool call
+      await audit.tool("ask_question", {
+        question_length: safeQuestion.length,
+        session_id: safeSessionId,
+        notebook_id: safeNotebookId,
+      }, true, Date.now() - startTime);
+
+    return {
+      success: true,
+      data: result,
+    };
+  } catch (error) {
+    const errorMessage =
+      error instanceof Error ? error.message : String(error);
+
+    // Special handling for rate limit errors
+    if (error instanceof RateLimitError || errorMessage.toLowerCase().includes("rate limit")) {
+      log.error(`🚫 [TOOL] Rate limit detected`);
+      await audit.security("notebooklm_rate_limit", "warning", {
+        session_id: safeSessionId,
+      });
+      await audit.tool("ask_question", args, false, Date.now() - startTime, "NotebookLM rate limit");
+      return {
+        success: false,
+        error:
+          "NotebookLM rate limit reached (50 queries/day for free accounts).\n\n" +
+          "You can:\n" +
+          "1. Use the 're_auth' tool to login with a different Google account\n" +
+          "2. Wait until tomorrow for the quota to reset\n" +
+          "3. Upgrade to Google AI Pro/Ultra for 5x higher limits\n\n" +
+          `Original error: ${errorMessage}`,
+      };
+    }
+
+    log.error(`❌ [TOOL] ask_question failed: ${errorMessage}`);
+    await audit.tool("ask_question", args, false, Date.now() - startTime, errorMessage);
+    return {
+      success: false,
+      error: errorMessage,
+    };
+  }
+}

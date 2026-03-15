@@ -1,4 +1,24 @@
-# Dockerfile for Smithery deployment
+# Dockerfile for Smithery deployment — multi-stage build
+
+# === Stage 1: Builder ===
+FROM node:20-slim AS builder
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install ALL dependencies (including dev for build)
+RUN npm ci
+
+# Copy source files
+COPY src/ ./src/
+COPY tsconfig.json ./
+
+# Build TypeScript
+RUN npm run build
+
+# === Stage 2: Runtime ===
 FROM node:20-slim
 
 # Install dependencies for Chromium (required by patchright)
@@ -25,18 +45,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy package files
+# Copy only production artifacts from builder
+COPY --from=builder /app/dist/ ./dist/
 COPY package*.json ./
 
-# Install ALL dependencies (including dev for build)
-RUN npm ci
-
-# Copy source files
-COPY src/ ./src/
-COPY tsconfig.json ./
-
-# Build TypeScript
-RUN npm run build
+# Install production dependencies only
+RUN npm ci --omit=dev
 
 # Install browser
 RUN npx patchright install chromium

@@ -69,6 +69,8 @@ class NotebookLMMCPServer {
   private resourceHandlers: ResourceHandlers;
   private settingsManager: SettingsManager;
   private toolDefinitions: Tool[];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private toolRegistry!: Map<string, (a: any, p?: (message: string, progress?: number, total?: number) => Promise<void>) => Promise<any>>;
 
   constructor() {
     // Initialize MCP Server
@@ -125,6 +127,69 @@ class NotebookLMMCPServer {
     // Register Resource Handlers (Resources, Templates, Completions)
     this.resourceHandlers.registerHandlers(this.server);
 
+    // Build tool registry once (not per-request)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this.toolRegistry = new Map<string, (a: any, p?: any) => Promise<any>>([
+      // Ask Question
+      ["ask_question", (a: any, p?: any) => this.toolHandlers.handleAskQuestion(a, p)],
+      // Notebook Management
+      ["add_notebook", (a: any) => this.toolHandlers.handleAddNotebook(a)],
+      ["list_notebooks", () => this.toolHandlers.handleListNotebooks()],
+      ["get_notebook", (a: any) => this.toolHandlers.handleGetNotebook(a)],
+      ["select_notebook", (a: any) => this.toolHandlers.handleSelectNotebook(a)],
+      ["update_notebook", (a: any) => this.toolHandlers.handleUpdateNotebook(a)],
+      ["remove_notebook", (a: any) => this.toolHandlers.handleRemoveNotebook(a)],
+      ["search_notebooks", (a: any) => this.toolHandlers.handleSearchNotebooks(a)],
+      ["get_library_stats", () => this.toolHandlers.handleGetLibraryStats()],
+      ["export_library", (a: any) => this.toolHandlers.handleExportLibrary(a)],
+      // Quota & System
+      ["get_quota", (a: any) => this.toolHandlers.handleGetQuota(a)],
+      ["set_quota_tier", (a: any) => this.toolHandlers.handleSetQuotaTier(a)],
+      ["get_project_info", () => this.toolHandlers.handleGetProjectInfo()],
+      // Notebook Creation
+      ["create_notebook", (a: any, p?: any) => this.toolHandlers.handleCreateNotebook(a, p)],
+      ["batch_create_notebooks", (a: any, p?: any) => this.toolHandlers.handleBatchCreateNotebooks(a, p)],
+      ["sync_library", (a: any) => this.toolHandlers.handleSyncLibrary(a)],
+      // Session Management
+      ["list_sessions", () => this.toolHandlers.handleListSessions()],
+      ["close_session", (a: any) => this.toolHandlers.handleCloseSession(a)],
+      ["reset_session", (a: any) => this.toolHandlers.handleResetSession(a)],
+      ["get_health", (a: any) => this.toolHandlers.handleGetHealth(a)],
+      // Auth
+      ["setup_auth", (a: any, p?: any) => this.toolHandlers.handleSetupAuth(a, p)],
+      ["re_auth", (a: any, p?: any) => this.toolHandlers.handleReAuth(a, p)],
+      ["cleanup_data", (a: any) => this.toolHandlers.handleCleanupData(a)],
+      // Sources
+      ["list_sources", (a: any) => this.toolHandlers.handleListSources(a)],
+      ["add_source", (a: any) => this.toolHandlers.handleAddSource(a)],
+      ["add_folder", (a: any, p?: any) => this.toolHandlers.handleAddFolder(a, p)],
+      ["remove_source", (a: any) => this.toolHandlers.handleRemoveSource(a)],
+      // Audio / Video / Data Table
+      ["generate_audio_overview", (a: any) => this.toolHandlers.handleGenerateAudioOverview(a)],
+      ["get_audio_status", (a: any) => this.toolHandlers.handleGetAudioStatus(a)],
+      ["download_audio", (a: any) => this.toolHandlers.handleDownloadAudio(a)],
+      ["generate_video_overview", (a: any) => this.toolHandlers.handleGenerateVideoOverview(a)],
+      ["get_video_status", (a: any) => this.toolHandlers.handleGetVideoStatus(a)],
+      ["generate_data_table", (a: any) => this.toolHandlers.handleGenerateDataTable(a)],
+      ["get_data_table", (a: any) => this.toolHandlers.handleGetDataTable(a)],
+      // Webhooks
+      ["configure_webhook", (a: any) => this.toolHandlers.handleConfigureWebhook(a)],
+      ["list_webhooks", () => this.toolHandlers.handleListWebhooks()],
+      ["test_webhook", (a: any) => this.toolHandlers.handleTestWebhook(a)],
+      ["remove_webhook", (a: any) => this.toolHandlers.handleRemoveWebhook(a)],
+      // Gemini API
+      ["deep_research", (a: any, p?: any) => this.toolHandlers.handleDeepResearch(a, p)],
+      ["gemini_query", (a: any) => this.toolHandlers.handleGeminiQuery(a)],
+      ["get_research_status", (a: any) => this.toolHandlers.handleGetResearchStatus(a)],
+      ["upload_document", (a: any) => this.toolHandlers.handleUploadDocument(a)],
+      ["query_document", (a: any) => this.toolHandlers.handleQueryDocument(a)],
+      ["list_documents", (a: any) => this.toolHandlers.handleListDocuments(a)],
+      ["delete_document", (a: any) => this.toolHandlers.handleDeleteDocument(a)],
+      ["query_chunked_document", (a: any) => this.toolHandlers.handleQueryChunkedDocument(a)],
+      ["get_query_history", (a: any) => this.toolHandlers.handleGetQueryHistory(a)],
+      ["get_notebook_chat_history", (a: any) => this.toolHandlers.handleGetNotebookChatHistory(a)],
+    ]);
+
     // List available tools
     this.server.setRequestHandler(ListToolsRequestSchema, async () => {
       log.info("📋 [MCP] list_tools request received");
@@ -145,7 +210,13 @@ class NotebookLMMCPServer {
       }
 
       // === SECURITY: MCP Authentication ===
-      const authResult = await authenticateMCPRequest(authToken, name);
+      // Tools that access the filesystem always require auth, even if globally disabled
+      const TOOLS_REQUIRING_AUTH = ["add_folder", "cleanup_data", "export_library"];
+      const requiresAuth = TOOLS_REQUIRING_AUTH.includes(name);
+
+      const authResult = requiresAuth
+        ? await authenticateMCPRequest(authToken, name, true)
+        : await authenticateMCPRequest(authToken, name);
       if (!authResult.authenticated) {
         log.warning(`🔒 [MCP] Authentication failed for tool: ${name}`);
         return {
@@ -178,416 +249,20 @@ class NotebookLMMCPServer {
       };
 
       try {
-        let result;
-
-        switch (name) {
-          case "ask_question":
-            result = await this.toolHandlers.handleAskQuestion(
-              args as {
-                question: string;
-                session_id?: string;
-                notebook_id?: string;
-                notebook_url?: string;
-                show_browser?: boolean;
+        const handler = this.toolRegistry.get(name);
+        if (!handler) {
+          log.error(`❌ [MCP] Unknown tool: ${name}`);
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({ success: false, error: `Unknown tool: ${name}` }, null, 2),
               },
-              sendProgress
-            );
-            break;
-
-          case "add_notebook":
-            result = await this.toolHandlers.handleAddNotebook(
-              args as {
-                url: string;
-                name: string;
-                description: string;
-                topics: string[];
-                content_types?: string[];
-                use_cases?: string[];
-                tags?: string[];
-              }
-            );
-            break;
-
-          case "list_notebooks":
-            result = await this.toolHandlers.handleListNotebooks();
-            break;
-
-          case "get_notebook":
-            result = await this.toolHandlers.handleGetNotebook(
-              args as { id: string }
-            );
-            break;
-
-          case "select_notebook":
-            result = await this.toolHandlers.handleSelectNotebook(
-              args as { id: string }
-            );
-            break;
-
-          case "update_notebook":
-            result = await this.toolHandlers.handleUpdateNotebook(
-              args as {
-                id: string;
-                name?: string;
-                description?: string;
-                topics?: string[];
-                content_types?: string[];
-                use_cases?: string[];
-                tags?: string[];
-                url?: string;
-              }
-            );
-            break;
-
-          case "remove_notebook":
-            result = await this.toolHandlers.handleRemoveNotebook(
-              args as { id: string }
-            );
-            break;
-
-          case "search_notebooks":
-            result = await this.toolHandlers.handleSearchNotebooks(
-              args as { query: string }
-            );
-            break;
-
-          case "get_library_stats":
-            result = await this.toolHandlers.handleGetLibraryStats();
-            break;
-
-          case "export_library":
-            result = await this.toolHandlers.handleExportLibrary(
-              args as { format?: "json" | "csv"; output_path?: string }
-            );
-            break;
-
-          case "get_quota":
-            result = await this.toolHandlers.handleGetQuota(
-              args as { sync?: boolean }
-            );
-            break;
-
-          case "set_quota_tier":
-            result = await this.toolHandlers.handleSetQuotaTier(
-              args as { tier: "free" | "pro" | "ultra" }
-            );
-            break;
-
-          case "get_project_info":
-            result = await this.toolHandlers.handleGetProjectInfo();
-            break;
-
-          case "create_notebook":
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            result = await this.toolHandlers.handleCreateNotebook(
-              args as any,
-              sendProgress
-            );
-            break;
-
-          case "list_sessions":
-            result = await this.toolHandlers.handleListSessions();
-            break;
-
-          case "close_session":
-            result = await this.toolHandlers.handleCloseSession(
-              args as { session_id: string }
-            );
-            break;
-
-          case "reset_session":
-            result = await this.toolHandlers.handleResetSession(
-              args as { session_id: string }
-            );
-            break;
-
-          case "get_health":
-            result = await this.toolHandlers.handleGetHealth(
-              args as { deep_check?: boolean; notebook_id?: string }
-            );
-            break;
-
-          case "setup_auth":
-            result = await this.toolHandlers.handleSetupAuth(
-              args as { show_browser?: boolean },
-              sendProgress
-            );
-            break;
-
-          case "re_auth":
-            result = await this.toolHandlers.handleReAuth(
-              args as { show_browser?: boolean },
-              sendProgress
-            );
-            break;
-
-          case "cleanup_data":
-            result = await this.toolHandlers.handleCleanupData(
-              args as { confirm: boolean }
-            );
-            break;
-
-          case "sync_library":
-            result = await this.toolHandlers.handleSyncLibrary(
-              args as { auto_fix?: boolean; show_browser?: boolean }
-            );
-            break;
-
-          case "batch_create_notebooks":
-            result = await this.toolHandlers.handleBatchCreateNotebooks(
-              args as {
-                notebooks: Array<{
-                  name: string;
-                  sources: Array<{ type: "url" | "text" | "file"; value: string; title?: string }>;
-                  description?: string;
-                  topics?: string[];
-                }>;
-                stop_on_error?: boolean;
-                show_browser?: boolean;
-              },
-              sendProgress
-            );
-            break;
-
-          case "list_sources":
-            result = await this.toolHandlers.handleListSources(
-              args as { notebook_id?: string; notebook_url?: string }
-            );
-            break;
-
-          case "add_source":
-            result = await this.toolHandlers.handleAddSource(
-              args as {
-                notebook_id?: string;
-                notebook_url?: string;
-                source: { type: "url" | "text" | "file"; value: string; title?: string };
-              }
-            );
-            break;
-
-          case "add_folder":
-            result = await this.toolHandlers.handleAddFolder(
-              args as {
-                folder_path: string;
-                notebook_id?: string;
-                notebook_url?: string;
-                recursive?: boolean;
-                file_types?: string[];
-                dry_run?: boolean;
-                notebook_name_prefix?: string;
-              },
-              sendProgress
-            );
-            break;
-
-          case "remove_source":
-            result = await this.toolHandlers.handleRemoveSource(
-              args as {
-                notebook_id?: string;
-                notebook_url?: string;
-                source_id: string;
-              }
-            );
-            break;
-
-          case "generate_audio_overview":
-            result = await this.toolHandlers.handleGenerateAudioOverview(
-              args as { notebook_id?: string; notebook_url?: string }
-            );
-            break;
-
-          case "get_audio_status":
-            result = await this.toolHandlers.handleGetAudioStatus(
-              args as { notebook_id?: string; notebook_url?: string }
-            );
-            break;
-
-          case "download_audio":
-            result = await this.toolHandlers.handleDownloadAudio(
-              args as {
-                notebook_id?: string;
-                notebook_url?: string;
-                output_path?: string;
-              }
-            );
-            break;
-
-          // Video Overview tools
-          case "generate_video_overview":
-            result = await this.toolHandlers.handleGenerateVideoOverview(
-              args as {
-                notebook_id?: string;
-                notebook_url?: string;
-                style?: import("./notebook-creation/video-manager.js").VideoStyle;
-                format?: import("./notebook-creation/video-manager.js").VideoFormat;
-              }
-            );
-            break;
-
-          case "get_video_status":
-            result = await this.toolHandlers.handleGetVideoStatus(
-              args as { notebook_id?: string; notebook_url?: string }
-            );
-            break;
-
-          // Data Table tools
-          case "generate_data_table":
-            result = await this.toolHandlers.handleGenerateDataTable(
-              args as { notebook_id?: string; notebook_url?: string }
-            );
-            break;
-
-          case "get_data_table":
-            result = await this.toolHandlers.handleGetDataTable(
-              args as { notebook_id?: string; notebook_url?: string }
-            );
-            break;
-
-          case "configure_webhook":
-            result = await this.toolHandlers.handleConfigureWebhook(
-              args as {
-                id?: string;
-                name: string;
-                url: string;
-                enabled?: boolean;
-                events?: string[];
-                format?: "generic" | "slack" | "discord" | "teams";
-                secret?: string;
-              }
-            );
-            break;
-
-          case "list_webhooks":
-            result = await this.toolHandlers.handleListWebhooks();
-            break;
-
-          case "test_webhook":
-            result = await this.toolHandlers.handleTestWebhook(
-              args as { id: string }
-            );
-            break;
-
-          case "remove_webhook":
-            result = await this.toolHandlers.handleRemoveWebhook(
-              args as { id: string }
-            );
-            break;
-
-          // Gemini API tools
-          case "deep_research":
-            result = await this.toolHandlers.handleDeepResearch(
-              args as {
-                query: string;
-                wait_for_completion?: boolean;
-                max_wait_seconds?: number;
-              },
-              sendProgress
-            );
-            break;
-
-          case "gemini_query":
-            // Type assertion for Gemini-specific types
-            result = await this.toolHandlers.handleGeminiQuery({
-              query: (args as { query: string }).query,
-              model: (args as { model?: string }).model as import("./gemini/types.js").GeminiModel | undefined,
-              tools: (args as { tools?: string[] }).tools as import("./gemini/types.js").GeminiTool[] | undefined,
-              urls: (args as { urls?: string[] }).urls,
-              previous_interaction_id: (args as { previous_interaction_id?: string }).previous_interaction_id,
-              thinking_level: (args as { thinking_level?: string }).thinking_level as "minimal" | "low" | "medium" | "high" | undefined,
-              response_schema: (args as { response_schema?: Record<string, unknown> }).response_schema,
-            });
-            break;
-
-          case "get_research_status":
-            result = await this.toolHandlers.handleGetResearchStatus(
-              args as { interaction_id: string }
-            );
-            break;
-
-          // Gemini Files API tools (v1.9.0)
-          case "upload_document":
-            result = await this.toolHandlers.handleUploadDocument(
-              args as { file_path: string; display_name?: string }
-            );
-            break;
-
-          case "query_document":
-            result = await this.toolHandlers.handleQueryDocument({
-              file_name: (args as { file_name: string }).file_name,
-              query: (args as { query: string }).query,
-              model: (args as { model?: string }).model as
-                | import("./gemini/types.js").GeminiModel
-                | undefined,
-              additional_files: (args as { additional_files?: string[] })
-                .additional_files,
-            });
-            break;
-
-          case "list_documents":
-            result = await this.toolHandlers.handleListDocuments(
-              args as { page_size?: number }
-            );
-            break;
-
-          case "delete_document":
-            result = await this.toolHandlers.handleDeleteDocument(
-              args as { file_name: string }
-            );
-            break;
-
-          // Chunked document tools (v1.10.0)
-          case "query_chunked_document":
-            result = await this.toolHandlers.handleQueryChunkedDocument(
-              args as { file_names: string[]; query: string; model?: string }
-            );
-            break;
-
-          // Query history tool
-          case "get_query_history":
-            result = await this.toolHandlers.handleGetQueryHistory(
-              args as {
-                session_id?: string;
-                notebook_id?: string;
-                date?: string;
-                search?: string;
-                limit?: number;
-              }
-            );
-            break;
-
-          // Chat history tool (browser automation)
-          case "get_notebook_chat_history":
-            result = await this.toolHandlers.handleGetNotebookChatHistory(
-              args as {
-                notebook_id?: string;
-                notebook_url?: string;
-                preview_only?: boolean;
-                limit?: number;
-                offset?: number;
-                output_file?: string;
-                show_browser?: boolean;
-              }
-            );
-            break;
-
-          default:
-            log.error(`❌ [MCP] Unknown tool: ${name}`);
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: JSON.stringify(
-                    {
-                      success: false,
-                      error: `Unknown tool: ${name}`,
-                    },
-                    null,
-                    2
-                  ),
-                },
-              ],
-            };
+            ],
+          };
         }
+
+        const result = await handler(args, sendProgress);
 
         // Return result
         return {
@@ -747,6 +422,12 @@ async function main() {
   if (args.length > 0 && args[0] === "config") {
     const cli = new CliHandler();
     await cli.handleCommand(args);
+    process.exit(0);
+  }
+
+  if (args.length > 0 && args[0] === "token") {
+    const { handleTokenCommand } = await import("./auth/mcp-auth.js");
+    await handleTokenCommand(args.slice(1));
     process.exit(0);
   }
 

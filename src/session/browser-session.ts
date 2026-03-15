@@ -21,7 +21,7 @@ import {
   waitForLatestAnswer,
   snapshotAllResponses,
 } from "../utils/page-utils.js";
-import { CONFIG } from "../config.js";
+import { CONFIG, getSecureLoginPassword } from "../config.js";
 import { log } from "../utils/logger.js";
 import type { SessionInfo, ProgressCallback } from "../types.js";
 import { RateLimitError } from "../errors.js";
@@ -167,13 +167,16 @@ export class BrowserSession {
       });
       log.success("  ✅ Chat input ready!");
     } catch {
-      // FALLBACK: Python alternative selector
+      // FALLBACK: Locale-agnostic selectors (no hardcoded German)
       try {
-        log.info("  ⏳ Trying fallback selector (aria-label)...");
-        await this.page.waitForSelector('textarea[aria-label="Feld für Anfragen"]', {
-          timeout: 5000, // Python uses 5s for fallback
-          state: "visible",
-        });
+        log.info("  ⏳ Trying fallback selectors (locale-agnostic)...");
+        await this.page.waitForSelector(
+          'textarea[aria-label], textarea[class*="query"], .chat-input textarea',
+          {
+            timeout: 5000,
+            state: "visible",
+          }
+        );
         log.success("  ✅ Chat input ready (fallback)!");
       } catch (error) {
         log.error(`  ❌ NotebookLM interface not ready: ${error}`);
@@ -248,11 +251,16 @@ export class BrowserSession {
 
     if (CONFIG.autoLoginEnabled) {
       log.info(`  🤖 Attempting auto-login...`);
+      const securePassword = getSecureLoginPassword();
+      if (!securePassword || securePassword.isWiped()) {
+        log.error(`  ❌ Login password not available or expired. Restart server or set LOGIN_PASSWORD.`);
+        return false;
+      }
       const loginSuccess = await this.authManager.loginWithCredentials(
         this.context,
         this.page,
         CONFIG.loginEmail,
-        CONFIG.loginPassword
+        securePassword.getValue()
       );
 
       if (loginSuccess) {
@@ -417,7 +425,7 @@ export class BrowserSession {
       await sendProgress?.("Waiting for NotebookLM response (streaming detection active)...", 3, 5);
       const answer = await waitForLatestAnswer(page, {
         question,
-        timeoutMs: 120000, // 2 minutes
+        timeoutMs: CONFIG.responseTimeout,
         pollIntervalMs: 1000,
         ignoreTexts: existingResponses,
         debug: false,
@@ -482,10 +490,12 @@ export class BrowserSession {
       return null;
     }
 
-    // Use EXACT Python selectors (in order of preference)
+    // Selectors in order of preference (locale-agnostic)
     const selectors = [
-      "textarea.query-box-input", // ← PRIMARY Python selector
-      'textarea[aria-label="Feld für Anfragen"]', // ← Python fallback
+      "textarea.query-box-input", // PRIMARY selector
+      'textarea[aria-label]', // Any textarea with aria-label (locale-agnostic)
+      'textarea[class*="query"]', // Class-based fallback
+      '.chat-input textarea', // Container-based fallback
     ];
 
     for (const selector of selectors) {

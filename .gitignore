@@ -40,7 +40,7 @@ medusa-env/
 # Archives / local notes
 *.tar.gz
 mcp-add-command.txt
-docs/why-notebooklm.md
+docs/
 
 # Internal go-live planning (not for public)
 golive.md

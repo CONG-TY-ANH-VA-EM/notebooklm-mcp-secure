@@ -13,6 +13,21 @@ import envPaths from "env-paths";
 import fs from "fs";
 import path from "path";
 import { mkdirSecure, PERMISSION_MODES } from "./utils/file-permissions.js";
+import { SecureCredential } from "./utils/secure-memory.js";
+
+/**
+ * Clamp an integer to a [min, max] range
+ */
+function clampInteger(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+/** Credential TTL: 30 minutes */
+const CREDENTIAL_TTL_MS = 30 * 60 * 1000;
+
+/** Secure credential holders (module-level so they persist) */
+let secureLoginPassword: SecureCredential | null = null;
+let secureGeminiApiKey: SecureCredential | null = null;
 
 // Cross-platform data paths (unified without -nodejs suffix)
 // Linux: ~/.local/share/notebooklm-mcp/
@@ -86,6 +101,13 @@ export interface Config {
 
   // Disable all Gemini API tools (for clients with context limitations)
   noGemini: boolean;
+
+  // NotebookLM response timeout (ms)
+  responseTimeout: number;
+
+  // Follow-up reminder
+  followUpReminder: string;
+  followUpEnabled: boolean;
 }
 
 /**
@@ -149,13 +171,20 @@ const DEFAULTS: Config = {
 
   // Disable all Gemini API tools
   noGemini: false,
+
+  // NotebookLM response timeout
+  responseTimeout: 120000, // 2 minutes
+
+  // Follow-up reminder
+  followUpReminder: "\n\nEXTREMELY IMPORTANT: Is that ALL you need to know? You can always ask another question using the same session ID! Think about it carefully: before you reply to the user, review their original request and this answer. If anything is still unclear or missing, ask me another question first.",
+  followUpEnabled: true,
 };
 
 
 /**
  * Parse boolean from string (for env vars)
  */
-function parseBoolean(value: string | undefined, defaultValue: boolean): boolean {
+export function parseBoolean(value: string | undefined, defaultValue: boolean): boolean {
   if (value === undefined) return defaultValue;
   const lower = value.toLowerCase();
   if (lower === "true" || lower === "1") return true;
@@ -166,7 +195,7 @@ function parseBoolean(value: string | undefined, defaultValue: boolean): boolean
 /**
  * Parse integer from string (for env vars)
  */
-function parseInteger(value: string | undefined, defaultValue: number): number {
+export function parseInteger(value: string | undefined, defaultValue: number): number {
   if (value === undefined) return defaultValue;
   const parsed = Number.parseInt(value, 10);
   return Number.isNaN(parsed) ? defaultValue : parsed;
@@ -175,26 +204,50 @@ function parseInteger(value: string | undefined, defaultValue: number): number {
 /**
  * Parse comma-separated array (for env vars)
  */
-function parseArray(value: string | undefined, defaultValue: string[]): string[] {
+export function parseArray(value: string | undefined, defaultValue: string[]): string[] {
   if (!value) return defaultValue;
   return value.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
 }
 
 /**
  * Apply environment variable overrides (legacy support)
+ * Includes range clamping for safety-critical values and SecureCredential wrapping.
  */
 function applyEnvOverrides(config: Config): Config {
+  // Read credentials into SecureCredential holders and clear from process.env
+  const rawPassword = process.env.LOGIN_PASSWORD || config.loginPassword;
+  if (rawPassword) {
+    secureLoginPassword = new SecureCredential(rawPassword, CREDENTIAL_TTL_MS);
+    delete process.env.LOGIN_PASSWORD;
+  }
+
+  const rawGeminiKey = process.env.GEMINI_API_KEY || config.geminiApiKey;
+  if (rawGeminiKey) {
+    secureGeminiApiKey = new SecureCredential(rawGeminiKey, CREDENTIAL_TTL_MS);
+    delete process.env.GEMINI_API_KEY;
+  }
+
   return {
     ...config,
     // Override with env vars if present
     notebookUrl: process.env.NOTEBOOK_URL || config.notebookUrl,
     headless: parseBoolean(process.env.HEADLESS, config.headless),
-    browserTimeout: parseInteger(process.env.BROWSER_TIMEOUT, config.browserTimeout),
-    maxSessions: parseInteger(process.env.MAX_SESSIONS, config.maxSessions),
-    sessionTimeout: parseInteger(process.env.SESSION_TIMEOUT, config.sessionTimeout),
+    browserTimeout: clampInteger(
+      parseInteger(process.env.BROWSER_TIMEOUT, config.browserTimeout),
+      5000, 300000
+    ),
+    maxSessions: clampInteger(
+      parseInteger(process.env.MAX_SESSIONS, config.maxSessions),
+      1, 50
+    ),
+    sessionTimeout: clampInteger(
+      parseInteger(process.env.SESSION_TIMEOUT, config.sessionTimeout),
+      60, 86400
+    ),
     autoLoginEnabled: parseBoolean(process.env.AUTO_LOGIN_ENABLED, config.autoLoginEnabled),
     loginEmail: process.env.LOGIN_EMAIL || config.loginEmail,
-    loginPassword: process.env.LOGIN_PASSWORD || config.loginPassword,
+    // Credential blanked from CONFIG — use getSecureLoginPassword() to access
+    loginPassword: "",
     autoLoginTimeoutMs: parseInteger(process.env.AUTO_LOGIN_TIMEOUT_MS, config.autoLoginTimeoutMs),
     stealthEnabled: parseBoolean(process.env.STEALTH_ENABLED, config.stealthEnabled),
     stealthRandomDelays: parseBoolean(process.env.STEALTH_RANDOM_DELAYS, config.stealthRandomDelays),
@@ -218,14 +271,36 @@ function applyEnvOverrides(config: Config): Config {
     instanceProfileMaxCount: parseInteger(process.env.NOTEBOOK_INSTANCE_MAX_COUNT, config.instanceProfileMaxCount),
 
     // Gemini API
-    geminiApiKey: process.env.GEMINI_API_KEY || config.geminiApiKey,
+    // Credential blanked from CONFIG — use getSecureGeminiApiKey() to access
+    geminiApiKey: rawGeminiKey ? null : config.geminiApiKey,
     geminiDefaultModel: process.env.GEMINI_DEFAULT_MODEL || config.geminiDefaultModel,
     geminiDeepResearchEnabled: parseBoolean(process.env.GEMINI_DEEP_RESEARCH_ENABLED, config.geminiDeepResearchEnabled),
     geminiTimeoutMs: parseInteger(process.env.GEMINI_TIMEOUT_MS, config.geminiTimeoutMs),
 
     // Disable Gemini tools
     noGemini: parseBoolean(process.env.NOTEBOOKLM_NO_GEMINI, config.noGemini),
+
+    // NotebookLM response timeout
+    responseTimeout: parseInteger(process.env.NLMCP_RESPONSE_TIMEOUT_MS, config.responseTimeout),
+
+    // Follow-up reminder
+    followUpReminder: process.env.NLMCP_FOLLOW_UP_REMINDER || config.followUpReminder,
+    followUpEnabled: parseBoolean(process.env.NLMCP_FOLLOW_UP_ENABLED, config.followUpEnabled),
   };
+}
+
+/**
+ * Get the secure login password credential
+ */
+export function getSecureLoginPassword(): SecureCredential | null {
+  return secureLoginPassword;
+}
+
+/**
+ * Get the secure Gemini API key credential
+ */
+export function getSecureGeminiApiKey(): SecureCredential | null {
+  return secureGeminiApiKey;
 }
 
 /**

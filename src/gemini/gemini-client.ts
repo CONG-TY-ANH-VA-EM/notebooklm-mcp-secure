@@ -7,7 +7,7 @@
 
 import { GoogleGenAI } from "@google/genai";
 import { log } from "../utils/logger.js";
-import { CONFIG } from "../config.js";
+import { CONFIG, getSecureGeminiApiKey } from "../config.js";
 import type { ProgressCallback } from "../types.js";
 import type {
   GeminiQueryOptions,
@@ -32,13 +32,55 @@ import path from "path";
 export { DEEP_RESEARCH_AGENT } from "./types.js";
 
 /**
+ * Retry a function with exponential backoff on transient errors.
+ * Retries on: HTTP 429, 500, 502, 503, network errors.
+ * Does NOT retry on: 400, 401, 403, 404.
+ */
+async function retryWithBackoff<T>(
+  fn: () => Promise<T>,
+  options: { maxRetries?: number; baseDelay?: number } = {}
+): Promise<T> {
+  const { maxRetries = 3, baseDelay = 1000 } = options;
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error: unknown) {
+      lastError = error;
+
+      // Don't retry on non-transient errors
+      if (error instanceof Error) {
+        const msg = error.message;
+        const statusMatch = msg.match(/(\d{3})/);
+        if (statusMatch) {
+          const status = parseInt(statusMatch[1], 10);
+          if ([400, 401, 403, 404].includes(status)) {
+            throw error;
+          }
+        }
+      }
+
+      if (attempt < maxRetries) {
+        const delay = baseDelay * Math.pow(2, attempt);
+        log.warning(`Gemini API error (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+/**
  * Client for Gemini Interactions API
  */
 export class GeminiClient {
   private client: GoogleGenAI | null = null;
 
   constructor(apiKey?: string) {
-    const key = apiKey || CONFIG.geminiApiKey;
+    const secureKey = getSecureGeminiApiKey();
+    const key = apiKey || (secureKey && !secureKey.isWiped() ? secureKey.getValue() : null) || CONFIG.geminiApiKey;
     if (key) {
       this.client = new GoogleGenAI({ apiKey: key });
       log.info("Gemini client initialized");
@@ -88,24 +130,27 @@ export class GeminiClient {
         input = `${options.query}\n\nPlease analyze these URLs:\n${options.urls.join("\n")}`;
       }
 
-      // Create interaction - use 'as any' to handle SDK type strictness
-      const response = await (this.client.interactions as any).create({
-        model,
-        input,
-        tools: tools.length > 0 ? tools : undefined,
-        previousInteractionId: options.previousInteractionId,
-        store: true,
-        generationConfig: options.generationConfig ? {
-          temperature: options.generationConfig.temperature,
-          maxOutputTokens: options.generationConfig.maxOutputTokens,
-          thinkingLevel: options.generationConfig.thinkingLevel,
-          ...(options.generationConfig.responseMimeType && {
-            responseMimeType: options.generationConfig.responseMimeType,
-          }),
-          ...(options.generationConfig.responseSchema && {
-            responseSchema: options.generationConfig.responseSchema,
-          }),
-        } : undefined,
+      // Retry with exponential backoff on transient errors
+      const response = await retryWithBackoff(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (this.client!.interactions as any).create({
+          model,
+          input,
+          tools: tools.length > 0 ? tools : undefined,
+          previousInteractionId: options.previousInteractionId,
+          store: true,
+          generationConfig: options.generationConfig ? {
+            temperature: options.generationConfig.temperature,
+            maxOutputTokens: options.generationConfig.maxOutputTokens,
+            thinkingLevel: options.generationConfig.thinkingLevel,
+            ...(options.generationConfig.responseMimeType && {
+              responseMimeType: options.generationConfig.responseMimeType,
+            }),
+            ...(options.generationConfig.responseSchema && {
+              responseSchema: options.generationConfig.responseSchema,
+            }),
+          } : undefined,
+        });
       });
 
       const interaction = this.mapInteraction(response);
